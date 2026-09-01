@@ -13,6 +13,7 @@
 //! - [`paths`] — where virtual machines live on disk
 //! - [`disk`] — creating qcow2 images through `qemu-img`
 //! - [`qemu`] — building a QEMU command line, and running it
+//! - [`vm`] — the lifecycle that ties those together
 
 pub mod config;
 pub mod disk;
@@ -20,5 +21,7 @@ pub mod error;
 pub mod paths;
 pub mod preflight;
 pub mod qemu;
+pub mod vm;
 
 pub use error::{Error, Result};
+pub use vm::Vm;
