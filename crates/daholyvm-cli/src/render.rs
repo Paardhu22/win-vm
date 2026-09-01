@@ -1,6 +1,12 @@
-//! Human-readable rendering of a preflight report.
+//! Human-readable rendering of core types.
+//!
+//! Formatting only. Every decision this prints has already been made by
+//! `daholyvm-core`, so the GUI can present the same facts differently
+//! without reimplementing any of them.
 
+use daholyvm_core::paths::Paths;
 use daholyvm_core::preflight::{format_kib, HostReport, Requirement, Status};
+use daholyvm_core::Vm;
 
 const WIDTH: usize = 78;
 const REMEDY_INDENT: &str = "        ";
@@ -92,6 +98,73 @@ fn print_summary(report: &HostReport, requirements: &[Requirement]) {
         );
         println!("  which is far too slow for a usable Windows guest. Resolve the warnings above.");
     }
+}
+
+pub fn print_created(vm: &Vm) {
+    let config = vm.config();
+    println!();
+    println!("Created `{}`", config.name);
+    println!(
+        "  {} vCPU, {} MiB RAM, {} GiB disk",
+        config.cpus, config.memory_mib, config.disk_gib
+    );
+    println!("  {}", vm.paths().dir().display());
+    println!();
+
+    match &config.iso {
+        Some(iso) => {
+            println!("  Boots from {}", iso.display());
+            println!(
+                "  Start the installation with: daholyvm run {}",
+                config.name
+            );
+        }
+        None => {
+            println!("  No installation medium is set. Add one to config.toml, or recreate");
+            println!("  the VM with --iso, then: daholyvm run {}", config.name);
+        }
+    }
+    println!();
+}
+
+pub fn print_running(vm: &Vm, pid: u32) {
+    let config = vm.config();
+    println!();
+    println!("Starting `{}` (qemu pid {pid})", config.name);
+    println!("  Shut the guest down from inside Windows to stop it cleanly.");
+    println!();
+}
+
+pub fn print_list(vms: &[Vm], paths: &Paths) {
+    if vms.is_empty() {
+        println!();
+        println!("No virtual machines yet.");
+        println!("  Create one with: daholyvm create win11 --iso /path/to/Windows.iso");
+        println!();
+        return;
+    }
+
+    let name_width = vms
+        .iter()
+        .map(|vm| vm.config().name.as_str().chars().count())
+        .max()
+        .unwrap_or(0);
+
+    println!();
+    for vm in vms {
+        let config = vm.config();
+        println!(
+            "  {:<name_width$}  {} vCPU, {} MiB RAM, {} GiB disk",
+            config.name.as_str(),
+            config.cpus,
+            config.memory_mib,
+            config.disk_gib,
+            name_width = name_width,
+        );
+    }
+    println!();
+    println!("  Stored in {}", paths.vms_dir().display());
+    println!();
 }
 
 /// Wrap text to `width` columns on whitespace boundaries.
