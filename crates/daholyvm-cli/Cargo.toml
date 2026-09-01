@@ -1,0 +1,17 @@
+[package]
+name = "daholyvm-cli"
+description = "Command line front end for DA-HOLY-VM."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "daholyvm"
+path = "src/main.rs"
+
+[dependencies]
+daholyvm-core.workspace = true
+clap.workspace = true
+serde_json.workspace = true

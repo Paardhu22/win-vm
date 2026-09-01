@@ -1,0 +1,12 @@
+[package]
+name = "daholyvm-core"
+description = "Core VM orchestration logic for DA-HOLY-VM. Contains no GUI or CLI code."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
