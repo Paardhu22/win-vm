@@ -19,7 +19,7 @@ pub use distro::{OsRelease, Package, PackageManager};
 pub use firmware::{Firmware, FirmwarePair};
 pub use kvm::Kvm;
 pub use platform::{format_kib, parse_meminfo, Platform};
-pub use qemu::{Qemu, QemuBinary, Version, MIN_QEMU_VERSION};
+pub use qemu::{Qemu, QemuBinary, Version, MIN_QEMU_VERSION, QEMU_IMG_BINARY, QEMU_SYSTEM_BINARY};
 pub use sysroot::Sysroot;
 
 use serde::Serialize;

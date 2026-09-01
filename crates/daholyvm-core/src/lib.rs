@@ -11,8 +11,10 @@
 //! - [`preflight`] — what this machine can do, and what to install if it cannot
 //! - [`config`] — what a virtual machine is, and the rules for a valid one
 //! - [`paths`] — where virtual machines live on disk
+//! - [`disk`] — creating qcow2 images through `qemu-img`
 
 pub mod config;
+pub mod disk;
 pub mod error;
 pub mod paths;
 pub mod preflight;
