@@ -24,11 +24,13 @@ model, and none is planned.
                 +--------------v--------------+
                 |  daholyvm-core              |
                 |                             |
-                |  preflight  detect the host |
-                |  config     model a VM      |
-                |  disk       qemu-img        |
+                |  vm         the lifecycle   |
                 |  qemu::args build argv      |
-                |  qemu::runtime  lifecycle   |
+                |  qemu::runtime  the process |
+                |  disk       qemu-img        |
+                |  paths      where VMs live  |
+                |  config     model a VM      |
+                |  preflight  detect the host |
                 +--------------+--------------+
                                |
                 +--------------v--------------+
@@ -56,15 +58,60 @@ Read-only probes producing a `HostReport`. Two rules shape this module:
 but you will not like the result" — an absent `/dev/kvm` is a warning, because
 QEMU really will fall back to TCG emulation, just far too slowly to be usable.
 
-### Planned modules
+### config, paths, disk
 
-| Module | Milestone | Responsibility |
-| --- | --- | --- |
-| `config` | 2 | `VmConfig` as serde/TOML, plus pure validation |
-| `disk` | 2 | Create and inspect qcow2 images via `qemu-img` |
-| `qemu::args` | 3 | Pure `(VmConfig, HostReport) -> Vec<OsString>` |
-| `qemu::runtime` | 3 | Spawn, monitor and cleanly stop the QEMU child |
-| `paths` | 2 | XDG-compliant VM storage locations |
+`VmConfig` is the whole of what DA-HOLY-VM knows about a guest, persisted as
+TOML beside its disk so it stays readable and hand-editable. Validation is
+**pure** — it inspects values, never the filesystem or the host — which is what
+makes the whole rule set unit testable. Whether the host can satisfy a config is
+preflight's question; whether an ISO still exists is checked at launch.
+
+`VmName` is a validated newtype rather than a sanitiser. Rewriting `../../etc`
+into something harmless would mean the VM the user asked for and the VM they got
+have different names, so the name is rejected instead.
+
+Storage is one directory per VM under `$XDG_DATA_HOME/daholyvm/vms/<name>/`,
+holding `config.toml`, `disk.qcow2` and `OVMF_VARS.fd`. Grouping by VM rather
+than by file type means a guest can be backed up, copied or deleted as a unit.
+Each VM gets a private copy of the OVMF variable store, made once: it holds the
+boot order and Secure Boot keys the guest writes, so recopying the distribution
+template would silently discard them.
+
+### qemu
+
+`args::build` is `(VmConfig, HostReport, VmPaths) -> Vec<OsString>` and is pure,
+so the exact command line a user would get is asserted in unit tests on a
+machine with no QEMU installed. A wrong flag here surfaces as a guest that will
+not boot, hours later, which is why this is the most heavily tested surface in
+the project.
+
+The device choices are guest-driven and are recorded where they are made:
+
+| Choice | Why |
+| --- | --- |
+| `q35` machine | OVMF and modern Windows both expect it; i440fx has no PCIe or SMM |
+| AHCI, not virtio | the Windows installer ships no virtio driver and would list no disks |
+| `e1000e` NIC | Windows has the driver in the box, so networking works during setup |
+| `-rtc base=localtime` | Windows keeps the hardware clock in local time |
+| `disable_s3=1` | Windows guests hang rather than resume from S3 |
+| `smm=on` + `pflash01 secure` | otherwise the guest can write its own Secure Boot variables |
+
+`runtime` owns the child process and nothing else. Stopping a VM is currently a
+hard kill; a graceful ACPI shutdown means driving QEMU's QMP socket.
+
+### vm
+
+The only module that knows what order the others go in. `Vm::create`,
+`Vm::load` and `Vm::launch` are what both front ends call, so the CLI and the
+future GUI cannot drift apart on what "create a VM" means.
+
+### Still to build
+
+| Module | Responsibility |
+| --- | --- |
+| `tpm` | drive `swtpm`, without which Windows 11 setup refuses to proceed |
+| `qemu::monitor` | QMP socket: graceful shutdown, status, running VMs |
+| `daholyvm-gui` | desktop front end over the same core types |
 
 ## Safety posture
 
@@ -85,5 +132,7 @@ The core crate is testable without QEMU, KVM or firmware present:
 - parsers (`/proc/cpuinfo`, `/proc/meminfo`, `/etc/os-release`, `/etc/group`,
   `--version` output) are pure functions over `&str`;
 - filesystem probes go through `Sysroot` and run against fixture trees;
-- the future `qemu::args` builder is a pure function, so the entire command line
-  can be asserted in unit tests without ever launching a VM.
+- `qemu::args` is a pure function, so the entire command line can be asserted in
+  unit tests without ever launching a VM;
+- `VmConfig` validation is pure, and config storage goes through an injectable
+  root, so VM creation and loading are tested inside a temporary directory.
