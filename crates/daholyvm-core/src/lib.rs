@@ -12,11 +12,13 @@
 //! - [`config`] — what a virtual machine is, and the rules for a valid one
 //! - [`paths`] — where virtual machines live on disk
 //! - [`disk`] — creating qcow2 images through `qemu-img`
+//! - [`qemu`] — building a QEMU command line, and running it
 
 pub mod config;
 pub mod disk;
 pub mod error;
 pub mod paths;
 pub mod preflight;
+pub mod qemu;
 
 pub use error::{Error, Result};
