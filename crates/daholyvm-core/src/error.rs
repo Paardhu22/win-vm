@@ -68,6 +68,25 @@ pub enum Error {
     #[error("`{binary}` was not found on PATH")]
     MissingBinary { binary: &'static str },
 
+    /// The VM asks for a TPM but the host cannot provide one.
+    #[error("this virtual machine is configured with a TPM, but {remedy}")]
+    TpmUnavailable { remedy: String },
+
+    /// A unix socket path longer than the kernel accepts.
+    #[error("the socket path `{path}` is {length} bytes, over the {limit} byte limit")]
+    SocketPathTooLong {
+        path: PathBuf,
+        length: usize,
+        limit: usize,
+    },
+
+    #[error("`{binary}` did not create its socket at `{path}` within {seconds} seconds")]
+    HelperTimeout {
+        binary: &'static str,
+        path: PathBuf,
+        seconds: u64,
+    },
+
     #[error("failed to run `{binary}`: {source}")]
     Spawn {
         binary: String,

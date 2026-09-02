@@ -8,7 +8,14 @@
 //!     config.toml     the VmConfig, hand-editable
 //!     disk.qcow2      the system disk
 //!     OVMF_VARS.fd    this VM's private UEFI variable store
+//!     tpm/            swtpm's state: the guest's TPM keys
 //! ```
+//!
+//! The one thing that does **not** live there is the swtpm control socket.
+//! Unix socket paths are limited to 108 bytes, which a long home directory and
+//! a 64 character VM name can exceed, so sockets go under `$XDG_RUNTIME_DIR`
+//! — which is both short and the correct place for them — falling back to the
+//! VM directory when that is unset.
 //!
 //! Grouping by VM rather than by file type means a VM can be backed up, copied
 //! or deleted as one directory, and it is obvious to the user what belongs to
@@ -25,14 +32,22 @@ use crate::{Error, Result};
 pub const CONFIG_FILE: &str = "config.toml";
 pub const DISK_FILE: &str = "disk.qcow2";
 pub const VARS_FILE: &str = "OVMF_VARS.fd";
+pub const TPM_DIR: &str = "tpm";
 
 const APP_DIR: &str = "daholyvm";
 const VMS_DIR: &str = "vms";
+
+/// `sun_path` is 108 bytes including its terminator on Linux. Exceeding it
+/// fails inside QEMU with a truncated path and a baffling message, so it is
+/// worth catching by name.
+pub const MAX_SOCKET_PATH: usize = 107;
 
 /// The root of DA-HOLY-VM's storage.
 #[derive(Debug, Clone)]
 pub struct Paths {
     data: PathBuf,
+    /// Where transient sockets go. `None` falls back to the VM's directory.
+    runtime: Option<PathBuf>,
 }
 
 impl Paths {
@@ -43,14 +58,36 @@ impl Paths {
             // The XDG spec's own fallback when the variable is unset or empty.
             _ => PathBuf::from(std::env::var_os("HOME").ok_or(Error::NoHome)?).join(".local/share"),
         };
+        let runtime = match std::env::var_os("XDG_RUNTIME_DIR") {
+            Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir).join(APP_DIR)),
+            _ => None,
+        };
+
         Ok(Paths {
             data: data.join(APP_DIR),
+            runtime,
         })
     }
 
     /// Storage rooted at an explicit directory, used by the tests.
     pub fn at(data: impl Into<PathBuf>) -> Self {
-        Paths { data: data.into() }
+        Paths {
+            data: data.into(),
+            runtime: None,
+        }
+    }
+
+    /// Storage with an explicit runtime directory, used by the tests.
+    pub fn at_with_runtime(data: impl Into<PathBuf>, runtime: impl Into<PathBuf>) -> Self {
+        Paths {
+            data: data.into(),
+            runtime: Some(runtime.into()),
+        }
+    }
+
+    /// Where sockets for this VM go, if anywhere better than its own directory.
+    pub fn runtime_dir(&self) -> Option<&Path> {
+        self.runtime.as_deref()
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -64,9 +101,12 @@ impl Paths {
     /// The directory belonging to one VM. The name is already validated, so it
     /// cannot escape `vms/`.
     pub fn vm(&self, name: &VmName) -> VmPaths {
-        VmPaths {
-            dir: self.vms_dir().join(name.as_str()),
-        }
+        let dir = self.vms_dir().join(name.as_str());
+        let tpm_socket = match &self.runtime {
+            Some(runtime) => runtime.join(format!("{}-swtpm.sock", name.as_str())),
+            None => dir.join(TPM_DIR).join("swtpm.sock"),
+        };
+        VmPaths { dir, tpm_socket }
     }
 
     /// Every VM on disk, in sorted order.
@@ -91,6 +131,7 @@ impl Paths {
 #[derive(Debug, Clone)]
 pub struct VmPaths {
     dir: PathBuf,
+    tpm_socket: PathBuf,
 }
 
 impl VmPaths {
@@ -110,6 +151,17 @@ impl VmPaths {
     /// the boot order live here, so it must never be shared between guests.
     pub fn vars(&self) -> PathBuf {
         self.dir.join(VARS_FILE)
+    }
+
+    /// swtpm's persistent state: the guest's own TPM keys live here, so this
+    /// is kept with the VM and never in a temporary directory.
+    pub fn tpm_state(&self) -> PathBuf {
+        self.dir.join(TPM_DIR)
+    }
+
+    /// The swtpm control socket QEMU connects to.
+    pub fn tpm_socket(&self) -> &Path {
+        &self.tpm_socket
     }
 
     pub fn exists(&self) -> bool {
@@ -172,6 +224,43 @@ mod tests {
 
         let found: Vec<String> = paths.list().iter().map(|n| n.to_string()).collect();
         assert_eq!(found, vec!["win10", "win11"]);
+    }
+
+    #[test]
+    fn tpm_state_stays_with_the_vm_but_the_socket_goes_to_the_runtime_dir() {
+        let paths = Paths::at_with_runtime("/data/daholyvm", "/run/user/1000/daholyvm");
+        let vm = paths.vm(&name("win11"));
+
+        assert_eq!(vm.tpm_state(), Path::new("/data/daholyvm/vms/win11/tpm"));
+        assert_eq!(
+            vm.tpm_socket(),
+            Path::new("/run/user/1000/daholyvm/win11-swtpm.sock")
+        );
+    }
+
+    #[test]
+    fn without_a_runtime_dir_the_socket_falls_back_beside_the_vm() {
+        let vm = Paths::at("/data/daholyvm").vm(&name("win11"));
+        assert_eq!(
+            vm.tpm_socket(),
+            Path::new("/data/daholyvm/vms/win11/tpm/swtpm.sock")
+        );
+    }
+
+    #[test]
+    fn a_runtime_socket_path_stays_well_inside_the_unix_limit() {
+        // The whole reason sockets are not kept beside the VM: this must hold
+        // even for the longest name the validator accepts.
+        let paths = Paths::at_with_runtime(
+            "/home/somebody/.local/share/daholyvm",
+            "/run/user/1000/daholyvm",
+        );
+        let longest = VmName::new("a".repeat(crate::config::MAX_NAME_LEN)).unwrap();
+        let socket = paths.vm(&longest).tpm_socket().as_os_str().len();
+        assert!(
+            socket <= MAX_SOCKET_PATH,
+            "{socket} bytes exceeds the limit"
+        );
     }
 
     #[test]
