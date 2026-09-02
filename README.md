@@ -45,20 +45,23 @@ explanation.
 | 1 | Host capability detection (`doctor`) | **Done** |
 | 2 | Config, storage layout, disk creation | **Done** |
 | 3 | QEMU command line, process lifecycle (`create`, `run`, `list`) | **Done** |
-| 4 | TPM 2.0 via `swtpm`, QMP graceful shutdown | Not started |
+| 4a | TPM 2.0 via `swtpm` | **Done** |
+| 4b | QMP graceful shutdown, background VMs | Not started |
 | 5 | Desktop GUI | Not started |
 
 Milestones 2 and 3 were built together as a single vertical slice, on the
 grounds that you learn what a `VmConfig` actually needs by booting a guest, not
 by designing one on paper.
 
-**What works today:** you can check a host, create a VM, and boot it from an
-ISO. 80 tests cover it, none of which need QEMU installed.
+**What works today:** you can check a host, create a VM with an emulated
+TPM 2.0, and boot it from an ISO. 103 tests cover it, none of which need QEMU
+or swtpm installed.
 
 **The honest caveat:** no Windows guest has been booted end to end yet, because
-the development host has neither `qemu-system-x86_64` nor OVMF installed. The
-generated command line is asserted by 12 unit tests, and every failure path is
-exercised, but "the tests pass" is not "Windows installed". See
+the development host has none of `qemu-system-x86_64`, OVMF or `swtpm`
+installed. The generated command line is asserted by 14 unit tests, the TPM
+start-up sequence is tested against a stand-in binary, and every failure path is
+exercised — but "the tests pass" is not "Windows installed". See
 [What does not work yet](#what-does-not-work-yet).
 
 ---
@@ -67,15 +70,18 @@ exercised, but "the tests pass" is not "Windows installed". See
 
 ### 1. Install the host requirements
 
-DA-HOLY-VM needs QEMU and OVMF. It will not install them for you — that needs
+DA-HOLY-VM needs QEMU, OVMF and swtpm. It will not install them for you — that needs
 root, and a tool that silently runs `sudo` is a tool you cannot trust.
 
 | Distribution | Command |
 | --- | --- |
-| Arch | `sudo pacman -S --needed qemu-desktop edk2-ovmf` |
-| Debian / Ubuntu | `sudo apt install qemu-system-x86 ovmf` |
-| Fedora / RHEL | `sudo dnf install qemu-system-x86 edk2-ovmf` |
-| openSUSE | `sudo zypper install qemu-x86 qemu-ovmf-x86_64` |
+| Arch | `sudo pacman -S --needed qemu-desktop edk2-ovmf swtpm` |
+| Debian / Ubuntu | `sudo apt install qemu-system-x86 ovmf swtpm` |
+| Fedora / RHEL | `sudo dnf install qemu-system-x86 edk2-ovmf swtpm` |
+| openSUSE | `sudo zypper install qemu-x86 qemu-ovmf-x86_64 swtpm` |
+
+`swtpm` is the TPM 2.0 emulator. It is optional for Windows 10 and **required
+for Windows 11**, which stops during setup without one.
 
 You also want to be in the `kvm` group, or `/dev/kvm` will not open:
 
@@ -151,13 +157,14 @@ Each module below `vm` does one job and knows nothing about its siblings:
 
 | Module | Lines | Tests | Job |
 | --- | --- | --- | --- |
-| `preflight` | 1440 | 34 | What can this host do, and what should the user install |
-| `config` | 290 | 11 | What a VM is, and the rules for a valid one |
-| `paths` | 181 | 5 | Where VMs live on disk |
+| `preflight` | 1553 | 37 | What can this host do, and what should the user install |
+| `config` | 320 | 12 | What a VM is, and the rules for a valid one |
+| `paths` | 270 | 8 | Where VMs live on disk |
 | `disk` | 141 | 5 | Create qcow2 images through `qemu-img` |
-| `qemu::args` | 391 | 12 | Turn a config into a QEMU command line (pure) |
-| `qemu::runtime` | 109 | 3 | Own the QEMU child process |
-| `vm` | 301 | 7 | The lifecycle that ties those together |
+| `qemu::args` | 437 | 14 | Turn a config into a QEMU command line (pure) |
+| `qemu::runtime` | 226 | 6 | Own the QEMU child process, and any helpers beside it |
+| `tpm` | 143 | 5 | Run `swtpm`, the software TPM 2.0 |
+| `vm` | 500 | 12 | The lifecycle that ties those together |
 
 ---
 
@@ -176,13 +183,15 @@ Six checks run, in this order:
 | 4 | QEMU system emulator | `qemu-system-x86_64` on `PATH`, `--version` | yes |
 | 5 | QEMU disk image tool | `qemu-img` on `PATH`, `--version` | yes |
 | 6 | UEFI firmware (OVMF) | 10 known `CODE`/`VARS` locations | yes |
+| 7 | TPM 2.0 emulator (swtpm) | `swtpm` on `PATH` | **no** |
 
 Each produces a `Requirement` with three statuses:
 
 - **`Ok`** — satisfied.
 - **`Warn`** — a VM can start, but you will not like the result. An absent
   `/dev/kvm` is only a warning, because QEMU really will fall back to TCG
-  software emulation — just far too slowly to be usable for Windows.
+  software emulation — just far too slowly to be usable for Windows. A missing
+  `swtpm` is likewise a warning: the VM starts, and only Windows 11 minds.
 - **`Missing`** — a hard blocker. A VM cannot start.
 
 `can_launch()` is "nothing is `Missing`". `doctor` exits `0` when that holds and
@@ -208,6 +217,9 @@ DA-HOLY-VM preflight
         --needed qemu-desktop
   x  UEFI firmware (OVMF)           no OVMF firmware pair found in any known location
         sudo pacman -S --needed edk2-ovmf
+  !  TPM 2.0 emulator (swtpm)       `swtpm` was not found on PATH
+        Windows 11 requires a TPM 2.0 and will refuse to install without one;
+        Windows 10 guests are unaffected: sudo pacman -S --needed swtpm
 
   Host resources: 20 logical cores, 15.2 GiB total, 7.6 GiB available RAM
 
@@ -296,10 +308,19 @@ starts writing.
    a shared template under `/usr`. Each VM needs a private writable copy, made
    **once** — it holds the boot order and Secure Boot keys the guest writes, so
    recopying the template on every boot would silently discard them.
-5. **Build the command line** — the pure function described below.
-6. **Spawn QEMU** with an argument vector, inheriting stdio so the guest's
+5. **Start the TPM,** if the VM has one. `swtpm` is a separate process, and it
+   must be *listening* before QEMU starts — QEMU connects to the socket as it
+   comes up and fails outright if it is not there. So the launch starts the
+   emulator, then waits for the socket to appear (up to 5 seconds) rather than
+   racing it.
+6. **Build the command line** — the pure function described below.
+7. **Spawn QEMU** with an argument vector, inheriting stdio so the guest's
    diagnostics land in your terminal.
-7. **Wait.** QEMU's window *is* the VM; shutting Windows down from inside it is
+8. **Adopt the emulator.** From here its lifetime is the guest's: whichever way
+   QEMU ends — clean shutdown, crash, or kill — `swtpm` is stopped with it. A
+   stray emulator holding a stale socket is exactly what makes the *next*
+   launch fail.
+9. **Wait.** QEMU's window *is* the VM; shutting Windows down from inside it is
    how the session ends.
 
 ---
@@ -334,6 +355,9 @@ available, exactly as `build` produces it:
 -drive    id=cd,if=none,format=raw,media=cdrom,readonly=on,file=~/ISOs/Win11.iso
 -device   ide-cd,drive=cd,bus=sata.1
 -boot     order=dc
+-chardev  socket,id=chrtpm,path=/run/user/1000/daholyvm/win11-swtpm.sock
+-tpmdev   emulator,id=tpm0,chardev=chrtpm
+-device   tpm-tis,tpmdev=tpm0
 -netdev   user,id=net0
 -device   e1000e,netdev=net0
 -device   qemu-xhci,id=usb
@@ -357,6 +381,7 @@ installer that runs and one that stops on a black screen or an empty disk list:
 | `-device ich9-ahci` + `ide-hd` | Emulated SATA, not virtio. The Windows installer ships no virtio driver and would present a disk selection screen listing no disks. See [ADR 0005](docs/adr/0005-emulated-ahci-not-virtio-for-the-system-disk.md). |
 | `-device ide-cd` + `-boot order=dc` | The medium is tried first, then the disk, so the same command line installs Windows and then boots what it installed. Without an ISO, `-boot order=c`. |
 | `-device e1000e` | Emulated rather than fast, but Windows has the driver in the box, so networking works *during installation*. |
+| `-chardev socket` + `-tpmdev emulator` + `-device tpm-tis` | The TPM 2.0. QEMU emulates none itself, so these connect the guest to the `swtpm` process running beside it. Omitted entirely when `tpm = false`. |
 | `-device usb-tablet` | Reports absolute pointer coordinates. Without it the host and guest cursors drift apart and the window has to grab your mouse. |
 | `-vga std` | The most broadly compatible adapter for a guest with no drivers installed yet. |
 
@@ -387,13 +412,26 @@ otherwise `~/.local/share`:
     ├── win11/
     │   ├── config.toml      the VmConfig, hand-editable
     │   ├── disk.qcow2       the system disk
-    │   └── OVMF_VARS.fd     this VM's private UEFI variable store
+    │   ├── OVMF_VARS.fd     this VM's private UEFI variable store
+    │   └── tpm/             swtpm's state: the guest's own TPM keys
     └── win10/
         └── ...
 ```
 
 Grouped by VM rather than by file type, so a guest can be backed up, copied or
 deleted as a single directory, and it is obvious what belongs to what.
+
+**Do not delete `tpm/`.** It holds the guest's endorsement key and anything
+Windows has sealed against it, BitLocker keys included. Removing it is
+equivalent to replacing the machine's motherboard, and the guest will treat it
+that way.
+
+The one thing that does *not* live there is the swtpm control socket, which
+goes to `$XDG_RUNTIME_DIR/daholyvm/<name>-swtpm.sock`. Unix socket paths are
+capped at 108 bytes, which a long home directory plus a 64 character VM name
+can exceed; the kernel truncates silently and QEMU then fails with a path
+nobody recognises. When `XDG_RUNTIME_DIR` is unset the socket falls back to the
+VM's `tpm/` directory, and the length is checked either way.
 
 `config.toml` is written by `create` and read by `run`:
 
@@ -402,6 +440,7 @@ name = "win11"
 cpus = 4
 memory_mib = 4096
 disk_gib = 8
+tpm = true
 iso = "/home/you/ISOs/Win11.iso"
 ```
 
@@ -434,6 +473,7 @@ Create a new virtual machine.
 | `--cpus <N>` | `4` | Virtual CPUs |
 | `--memory <MIB>` | `4096` | Memory in MiB |
 | `--disk <GIB>` | `64` | Disk size in GiB |
+| `--no-tpm` | off | Omit the TPM. Windows 11 will refuse to install |
 
 ### `daholyvm run <name>`
 
@@ -456,6 +496,7 @@ daholyvm: invalid configuration: `memory_mib` must be at least 512 MiB
 daholyvm: this host cannot launch a virtual machine: run `daholyvm doctor` to see what is missing
 daholyvm: installation medium `/iso/gone.iso` does not exist
 daholyvm: refusing to overwrite the existing disk image at `...`
+daholyvm: this virtual machine is configured with a TPM, but `swtpm` was not found on PATH; sudo pacman -S --needed swtpm, or recreate the VM with --no-tpm (Windows 11 will then refuse to install)
 ```
 
 ---
@@ -498,6 +539,19 @@ always have the same name.
 | Default | `64` |
 | Range | 1–8192 |
 
+### `tpm`
+
+| | |
+| --- | --- |
+| Type | boolean |
+| Default | `true` |
+| CLI | `--no-tpm` to disable |
+
+Gives the guest an emulated TPM 2.0, backed by an `swtpm` process started
+alongside QEMU. On by default because Windows 11 refuses to install without one,
+and a guest that does not need it pays only a second process. See
+[ADR 0006](docs/adr/0006-emulate-a-tpm-with-swtpm-and-default-it-on.md).
+
 ### `iso`
 
 | | |
@@ -528,6 +582,7 @@ anything structural:
 | [0003](docs/adr/0003-argument-vectors-never-shell-strings.md) | Build argument vectors, never shell strings |
 | [0004](docs/adr/0004-preflight-reports-remedies-not-booleans.md) | Preflight reports remedies, not booleans |
 | [0005](docs/adr/0005-emulated-ahci-not-virtio-for-the-system-disk.md) | Emulated AHCI for the system disk, not virtio |
+| [0006](docs/adr/0006-emulate-a-tpm-with-swtpm-and-default-it-on.md) | Emulate a TPM with swtpm, and default it on |
 
 The overall design is described in
 [`docs/architecture.md`](docs/architecture.md).
@@ -557,7 +612,7 @@ The overall design is described in
 ## Testing
 
 ```
-cargo test              # 80 tests, none need QEMU, KVM or firmware installed
+cargo test              # 103 tests; none need QEMU, KVM, firmware or swtpm
 cargo clippy --all-targets
 cargo fmt
 ```
@@ -568,20 +623,23 @@ The design makes this possible rather than a mock framework:
   `/etc/os-release`, `/etc/group`, `--version` output.
 - **Filesystem probes go through `Sysroot`**, pointed at fixture trees.
 - **`qemu::args::build` is pure**, so the entire command line is asserted
-  without ever launching a VM. Twelve tests cover acceleration fallback, Secure
-  Boot, boot order with and without an ISO, comma escaping, and the absence of
-  virtio block devices.
+  without ever launching a VM. Fourteen tests cover acceleration fallback,
+  Secure Boot, boot order with and without an ISO, comma escaping, the TPM
+  devices, and the absence of virtio block devices.
 - **`VmConfig::validate` is pure**, and storage goes through an injectable root,
   so VM creation and loading are tested inside a temporary directory.
 - **Process handling is tested against `/bin/sh`**, which stands in for QEMU:
   the point is that the wrapper reports a real exit status rather than
-  swallowing it.
+  swallowing it, and that helper processes never outlive the guest.
+- **The TPM start-up sequence is tested against a stand-in `swtpm`** — a script
+  that creates its socket after a deliberate delay — which proves the launch
+  waits for the socket rather than racing it, and that an emulator which never
+  listens times out instead of hanging.
 
-Every commit that adds Rust code since the workspace was scaffolded compiles on
-its own — verified by checking each one out in a scratch clone. The two earliest
-commits (the empty workspace, and the core crate before the CLI's `main.rs`
-existed) do not build as a whole workspace, which is what a scaffolding commit
-looks like.
+Every commit that adds Rust code compiles on its own, verified by checking each
+one out in a scratch clone, so `git bisect` works. The two earliest commits —
+the empty workspace, and the core crate before the CLI's `main.rs` existed — do
+not build as a whole workspace, which is what a scaffolding commit looks like.
 
 ---
 
@@ -589,14 +647,14 @@ looks like.
 
 Read this before assuming a Windows 11 install will succeed.
 
-- **No TPM.** Windows 11 checks for TPM 2.0 during setup and refuses to install
-  without it. Windows 10 guests are unaffected. Emulating one means driving
-  `swtpm` as a second process with its own socket, which is the next thing to
-  build.
-- **No end-to-end boot has been verified.** The development host has neither
-  `qemu-system-x86_64` nor OVMF installed, so `run` correctly refuses before
-  spawning anything. The command line is unit tested; it has not yet installed
-  Windows.
+- **No end-to-end boot has been verified.** The development host has none of
+  `qemu-system-x86_64`, OVMF or `swtpm` installed, so `run` correctly refuses
+  before spawning anything. The command line and the TPM sequencing are tested;
+  they have not yet installed Windows.
+- **The TPM has not been exercised against real `swtpm`.** The start-up
+  ordering, socket wait, timeout and cleanup are tested against a stand-in
+  binary. The invocation itself is asserted flag by flag but has never spoken
+  to the actual emulator.
 - **Storage is emulated AHCI, not virtio.** Deliberate — see
   [ADR 0005](docs/adr/0005-emulated-ahci-not-virtio-for-the-system-disk.md) —
   but it costs disk throughput.
@@ -614,8 +672,9 @@ Read this before assuming a Windows 11 install will succeed.
 
 ## Roadmap
 
-**Next:** `swtpm` integration for TPM 2.0, which is what stands between this and
-a working Windows 11 install.
+**Next:** verify a real Windows install end to end, on a host that actually has
+QEMU, OVMF and swtpm. Everything below this line is speculative until that has
+happened once.
 
 **After that:** the QMP monitor socket, which unlocks graceful shutdown, VM
 status, and background VMs in one go — `stop`, `list --running`, and a `run`
@@ -643,8 +702,14 @@ Run `daholyvm doctor`. Something is `Missing`, and the report says which and how
 to fix it.
 
 **Windows 11 setup says this PC doesn't meet the requirements.**
-That is the missing TPM. Not yet supported — see
-[What does not work yet](#what-does-not-work-yet).
+Almost certainly the TPM. Run `daholyvm doctor` — if it warns that `swtpm` is
+missing, install it and recreate the VM, or check that `tpm = true` in the VM's
+`config.toml`. Secure Boot is the other requirement; `doctor` warns when your
+firmware cannot do it.
+
+**`run` says the VM is configured with a TPM but swtpm was not found.**
+Install `swtpm` (the error names the command for your distribution), or set
+`tpm = false` in `config.toml` and accept that Windows 11 will not install.
 
 **The installer shows no disks.**
 Should not happen, since storage is AHCI specifically to avoid it. If it does,
@@ -665,13 +730,14 @@ crates/
       config.rs           VmConfig, VmName, validation, TOML
       paths.rs            XDG storage layout
       disk.rs             qcow2 creation via qemu-img
+      tpm.rs              the swtpm process
       vm.rs               create / load / launch lifecycle
       error.rs            one error type for the crate
       qemu/
         args.rs           the pure command-line builder
-        runtime.rs        the QEMU child process
+        runtime.rs        the QEMU child process and its helpers
       preflight/          host capability detection
-        cpu.rs kvm.rs qemu.rs firmware.rs distro.rs platform.rs
+        cpu.rs kvm.rs qemu.rs firmware.rs distro.rs platform.rs tpm.rs
         sysroot.rs        injectable filesystem root
         which.rs          minimal which(1)
   daholyvm-cli/           thin `daholyvm` binary

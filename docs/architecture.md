@@ -27,6 +27,7 @@ model, and none is planned.
                 |  vm         the lifecycle   |
                 |  qemu::args build argv      |
                 |  qemu::runtime  the process |
+                |  tpm        swtpm           |
                 |  disk       qemu-img        |
                 |  paths      where VMs live  |
                 |  config     model a VM      |
@@ -95,9 +96,26 @@ The device choices are guest-driven and are recorded where they are made:
 | `-rtc base=localtime` | Windows keeps the hardware clock in local time |
 | `disable_s3=1` | Windows guests hang rather than resume from S3 |
 | `smm=on` + `pflash01 secure` | otherwise the guest can write its own Secure Boot variables |
+| `tpm-tis` + `tpmdev emulator` | Windows 11 setup stops without a TPM 2.0; QEMU emulates none itself |
 
-`runtime` owns the child process and nothing else. Stopping a VM is currently a
-hard kill; a graceful ACPI shutdown means driving QEMU's QMP socket.
+`runtime` owns the child process, and any helper processes serving it. Stopping
+a VM is currently a hard kill; a graceful ACPI shutdown means driving QEMU's QMP
+socket.
+
+### tpm
+
+A guest with a TPM is two processes. QEMU emulates no TPM itself — it speaks to
+`swtpm` over a unix socket — so `vm::launch` starts the emulator, waits for its
+socket to appear rather than racing it, and hands the child to `runtime` so that
+whichever way QEMU ends, nothing is left running. A stray `swtpm` holding a
+stale socket is exactly what makes the *next* launch fail.
+
+TPM state is persistent and lives with the VM: it holds the guest's endorsement
+key and anything Windows seals against it. The socket does not, because unix
+socket paths are capped at 108 bytes and a long home plus a long VM name can
+exceed that; sockets go under `$XDG_RUNTIME_DIR`, and the limit is checked by
+name rather than left to the kernel to truncate silently. ADR 0006 has the
+reasoning.
 
 ### vm
 
@@ -109,7 +127,6 @@ future GUI cannot drift apart on what "create a VM" means.
 
 | Module | Responsibility |
 | --- | --- |
-| `tpm` | drive `swtpm`, without which Windows 11 setup refuses to proceed |
 | `qemu::monitor` | QMP socket: graceful shutdown, status, running VMs |
 | `daholyvm-gui` | desktop front end over the same core types |
 
@@ -135,4 +152,7 @@ The core crate is testable without QEMU, KVM or firmware present:
 - `qemu::args` is a pure function, so the entire command line can be asserted in
   unit tests without ever launching a VM;
 - `VmConfig` validation is pure, and config storage goes through an injectable
-  root, so VM creation and loading are tested inside a temporary directory.
+  root, so VM creation and loading are tested inside a temporary directory;
+- helper processes are tested against stand-in binaries — `/bin/sh` for QEMU, a
+  script that creates a socket after a delay for `swtpm` — so process ordering
+  and cleanup are asserted without either being installed.
