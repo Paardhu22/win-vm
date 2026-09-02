@@ -184,7 +184,7 @@ mod tests {
     use super::*;
     use crate::config::VmName;
     use crate::paths::Paths;
-    use crate::preflight::{Cpu, Firmware, Kvm, Platform, Qemu, VirtExtension};
+    use crate::preflight::{Cpu, Firmware, Kvm, Platform, Qemu, Tpm, VirtExtension};
     use std::path::PathBuf;
 
     fn firmware_pair(secure_boot: bool) -> FirmwarePair {
@@ -218,6 +218,9 @@ mod tests {
                 img: None,
             },
             firmware: Firmware { found: firmware },
+            tpm: Tpm {
+                swtpm: Some(PathBuf::from("/usr/bin/swtpm")),
+            },
         }
     }
 

@@ -154,7 +154,7 @@ impl Vm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preflight::{Cpu, Firmware, FirmwarePair, Kvm, Platform, Qemu, VirtExtension};
+    use crate::preflight::{Cpu, Firmware, FirmwarePair, Kvm, Platform, Qemu, Tpm, VirtExtension};
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
@@ -165,6 +165,10 @@ mod tests {
     }
 
     fn host_without_qemu() -> HostReport {
+        host_without_qemu_with_tpm(None)
+    }
+
+    fn host_without_qemu_with_tpm(swtpm: Option<PathBuf>) -> HostReport {
         HostReport {
             platform: Platform {
                 is_linux: true,
@@ -193,6 +197,7 @@ mod tests {
                     origin: "test",
                 }],
             },
+            tpm: Tpm { swtpm },
         }
     }
 

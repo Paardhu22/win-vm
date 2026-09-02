@@ -92,6 +92,8 @@ fn unquote(value: &str) -> String {
 pub enum Package {
     Qemu,
     Ovmf,
+    /// The TPM 2.0 emulator, without which Windows 11 setup refuses to run.
+    Swtpm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -110,12 +112,16 @@ impl PackageManager {
         let name = match (self, package) {
             (PackageManager::Pacman, Package::Qemu) => "qemu-desktop",
             (PackageManager::Pacman, Package::Ovmf) => "edk2-ovmf",
+            (PackageManager::Pacman, Package::Swtpm) => "swtpm",
             (PackageManager::Apt, Package::Qemu) => "qemu-system-x86",
             (PackageManager::Apt, Package::Ovmf) => "ovmf",
+            (PackageManager::Apt, Package::Swtpm) => "swtpm",
             (PackageManager::Dnf, Package::Qemu) => "qemu-system-x86",
             (PackageManager::Dnf, Package::Ovmf) => "edk2-ovmf",
+            (PackageManager::Dnf, Package::Swtpm) => "swtpm",
             (PackageManager::Zypper, Package::Qemu) => "qemu-x86",
             (PackageManager::Zypper, Package::Ovmf) => "qemu-ovmf-x86_64",
+            (PackageManager::Zypper, Package::Swtpm) => "swtpm",
             (PackageManager::Unknown, Package::Qemu) => {
                 return "install QEMU (the `qemu-system-x86_64` binary) using your distribution's \
                         package manager"
@@ -124,6 +130,11 @@ impl PackageManager {
             (PackageManager::Unknown, Package::Ovmf) => {
                 return "install the OVMF/edk2 UEFI firmware package using your distribution's \
                         package manager"
+                    .to_owned()
+            }
+            (PackageManager::Unknown, Package::Swtpm) => {
+                return "install the `swtpm` TPM emulator using your distribution's package \
+                        manager"
                     .to_owned()
             }
         };

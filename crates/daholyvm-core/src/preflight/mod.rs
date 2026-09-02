@@ -12,6 +12,7 @@ mod kvm;
 mod platform;
 mod qemu;
 mod sysroot;
+mod tpm;
 mod which;
 
 pub use cpu::{Cpu, VirtExtension};
@@ -21,6 +22,7 @@ pub use kvm::Kvm;
 pub use platform::{format_kib, parse_meminfo, Platform};
 pub use qemu::{Qemu, QemuBinary, Version, MIN_QEMU_VERSION, QEMU_IMG_BINARY, QEMU_SYSTEM_BINARY};
 pub use sysroot::Sysroot;
+pub use tpm::{Tpm, SWTPM_BINARY};
 
 use serde::Serialize;
 
@@ -79,6 +81,7 @@ pub struct HostReport {
     pub kvm: Kvm,
     pub qemu: Qemu,
     pub firmware: Firmware,
+    pub tpm: Tpm,
 }
 
 impl HostReport {
@@ -97,6 +100,7 @@ impl HostReport {
             kvm: Kvm::detect_in(root),
             qemu: Qemu::detect(),
             firmware: Firmware::detect_in(root),
+            tpm: Tpm::detect(),
             platform,
         }
     }
@@ -111,6 +115,7 @@ impl HostReport {
             self.qemu.system_requirement(pm),
             self.qemu.img_requirement(pm),
             self.firmware.requirement(pm),
+            self.tpm.requirement(pm),
         ]
     }
 
