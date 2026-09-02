@@ -10,10 +10,10 @@
 //! cannot drift apart on what "create a VM" means.
 
 use crate::config::{VmConfig, VmName};
-use crate::paths::{Paths, VmPaths};
-use crate::preflight::{HostReport, QEMU_IMG_BINARY, QEMU_SYSTEM_BINARY};
+use crate::paths::{Paths, VmPaths, MAX_SOCKET_PATH};
+use crate::preflight::{HostReport, Package, QEMU_IMG_BINARY, QEMU_SYSTEM_BINARY, SWTPM_BINARY};
 use crate::qemu::{args, runtime, Running};
-use crate::{disk, Error, Result};
+use crate::{disk, tpm, Error, Result};
 
 /// A virtual machine that exists on disk.
 #[derive(Debug, Clone)]
@@ -122,8 +122,70 @@ impl Vm {
 
         self.provision_vars(host)?;
 
+        // swtpm has to be listening before QEMU starts, because QEMU connects
+        // to the socket as it comes up and fails outright if it is not there.
+        let emulator = if self.config.tpm {
+            Some(self.start_tpm(host)?)
+        } else {
+            None
+        };
+
         let argv = args::build(&self.config, host, &self.paths)?;
-        runtime::spawn(&qemu_system, &argv)
+        let mut running = runtime::spawn(&qemu_system, &argv)?;
+
+        // From here the emulator's lifetime is the guest's, including on the
+        // paths where the guest dies early.
+        if let Some(child) = emulator {
+            running.adopt(SWTPM_BINARY, child);
+        }
+
+        Ok(running)
+    }
+
+    /// Start the software TPM this guest is configured with.
+    fn start_tpm(&self, host: &HostReport) -> Result<std::process::Child> {
+        self.start_tpm_within(host, tpm::SOCKET_TIMEOUT)
+    }
+
+    /// The above, with the wait made explicit so tests need not sit through it.
+    fn start_tpm_within(
+        &self,
+        host: &HostReport,
+        timeout: std::time::Duration,
+    ) -> Result<std::process::Child> {
+        let swtpm = host
+            .tpm
+            .swtpm
+            .as_ref()
+            .ok_or_else(|| Error::TpmUnavailable {
+                remedy: format!(
+                    "`{SWTPM_BINARY}` was not found on PATH; {}, or recreate the VM with --no-tpm \
+                 (Windows 11 will then refuse to install)",
+                    host.platform.package_manager().install_hint(Package::Swtpm)
+                ),
+            })?;
+
+        let socket = self.paths.tpm_socket();
+        // Caught by name here, because the kernel silently truncates instead
+        // and QEMU then fails with a path nobody recognises.
+        let length = socket.as_os_str().len();
+        if length > MAX_SOCKET_PATH {
+            return Err(Error::SocketPathTooLong {
+                path: socket.to_owned(),
+                length,
+                limit: MAX_SOCKET_PATH,
+            });
+        }
+
+        let state = self.paths.tpm_state();
+        std::fs::create_dir_all(&state).map_err(|source| Error::write(&state, source))?;
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| Error::write(parent, source))?;
+        }
+
+        let child = tpm::start(swtpm, &state, socket)?;
+        tpm::wait_for_socket(socket, timeout)?;
+        Ok(child)
     }
 
     /// Give this VM its own copy of the OVMF variable store.
@@ -280,6 +342,138 @@ mod tests {
         // The host has no QEMU, so preflight reports a blocker.
         let err = vm.launch(&host_without_qemu()).unwrap_err();
         assert!(err.to_string().contains("doctor"), "{err}");
+    }
+
+    #[test]
+    fn a_tpm_vm_on_a_host_without_swtpm_says_what_to_install() {
+        let root = scratch("no-swtpm");
+        let paths = Paths::at(&root);
+        let config = VmConfig::new(name("win11"));
+        let vm_paths = paths.vm(&config.name);
+        std::fs::create_dir_all(vm_paths.dir()).unwrap();
+        let vm = Vm {
+            config,
+            paths: vm_paths,
+        };
+
+        let err = vm.start_tpm(&host_without_qemu()).unwrap_err();
+        assert!(matches!(err, Error::TpmUnavailable { .. }), "{err}");
+        let text = err.to_string();
+        assert!(text.contains("swtpm"), "{text}");
+        assert!(
+            text.contains("--no-tpm"),
+            "the way out must be offered: {text}"
+        );
+    }
+
+    #[test]
+    fn an_overlong_socket_path_is_rejected_by_name() {
+        // The kernel truncates instead, and QEMU then fails with a path nobody
+        // recognises, so this must be caught here.
+        let root = scratch("long-socket");
+        let paths = Paths::at(root.join("a".repeat(120)));
+        let config = VmConfig::new(name("win11"));
+        let vm_paths = paths.vm(&config.name);
+        let vm = Vm {
+            config,
+            paths: vm_paths,
+        };
+
+        let host = host_without_qemu_with_tpm(Some(PathBuf::from("/usr/bin/swtpm")));
+        let err = vm.start_tpm(&host).unwrap_err();
+        assert!(matches!(err, Error::SocketPathTooLong { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_vm_without_a_tpm_never_looks_for_swtpm() {
+        let root = scratch("no-tpm-configured");
+        let paths = Paths::at(&root);
+        let config = VmConfig::new(name("win10")).with_tpm(false);
+        let vm_paths = paths.vm(&config.name);
+        std::fs::create_dir_all(vm_paths.dir()).unwrap();
+        let vm = Vm {
+            config,
+            paths: vm_paths,
+        };
+
+        // The host has no swtpm at all; launch must fail on QEMU instead.
+        let err = vm.launch(&host_without_qemu()).unwrap_err();
+        assert!(
+            !matches!(err, Error::TpmUnavailable { .. }),
+            "a VM with tpm = false must not require swtpm: {err}"
+        );
+    }
+
+    /// A stand-in for swtpm: creates its socket after a short delay, then
+    /// stays alive. The delay is the point — it proves the launch waits.
+    fn fake_swtpm(dir: &std::path::Path) -> PathBuf {
+        let script = dir.join("fake-swtpm");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             for a in \"$@\"; do\n\
+             case \"$a\" in type=unixio,path=*) sock=${a#type=unixio,path=} ;; esac\n\
+             done\n\
+             sleep 0.2\n\
+             : > \"$sock\"\n\
+             sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &script,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .unwrap();
+        script
+    }
+
+    #[test]
+    fn the_tpm_is_started_and_waited_for_before_the_guest() {
+        let root = scratch("tpm-sequencing");
+        let paths = Paths::at(&root);
+        let config = VmConfig::new(name("win11"));
+        let vm_paths = paths.vm(&config.name);
+        std::fs::create_dir_all(vm_paths.dir()).unwrap();
+        let vm = Vm {
+            config,
+            paths: vm_paths,
+        };
+
+        let host = host_without_qemu_with_tpm(Some(fake_swtpm(&root)));
+        let mut child = vm.start_tpm(&host).expect("the emulator must start");
+
+        // start_tpm only returns once the socket exists, because QEMU would
+        // otherwise fail to connect to it.
+        assert!(
+            vm.paths().tpm_socket().exists(),
+            "start_tpm returned before the socket appeared"
+        );
+        // State is persistent and belongs to the guest, not to this run.
+        assert!(vm.paths().tpm_state().is_dir());
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn an_emulator_that_never_listens_times_out_instead_of_hanging() {
+        let root = scratch("tpm-timeout");
+        let paths = Paths::at(&root);
+        let config = VmConfig::new(name("win11"));
+        let vm_paths = paths.vm(&config.name);
+        std::fs::create_dir_all(vm_paths.dir()).unwrap();
+
+        // `true` stands in for an swtpm that exits without ever listening.
+        let host = host_without_qemu_with_tpm(Some(PathBuf::from("/bin/true")));
+        let vm = Vm {
+            config,
+            paths: vm_paths,
+        };
+
+        let err = vm
+            .start_tpm_within(&host, std::time::Duration::from_millis(80))
+            .unwrap_err();
+        assert!(matches!(err, Error::HelperTimeout { .. }), "{err}");
     }
 
     #[test]

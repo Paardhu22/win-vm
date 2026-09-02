@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use daholyvm_core::config::{VmConfig, VmName, DEFAULT_CPUS, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB};
+use daholyvm_core::config::{
+    VmConfig, VmName, DEFAULT_CPUS, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_TPM,
+};
 use daholyvm_core::paths::Paths;
 use daholyvm_core::preflight::HostReport;
 use daholyvm_core::{Result, Vm};
@@ -129,6 +131,7 @@ fn create(
         cpus,
         memory_mib,
         disk_gib,
+        tpm: DEFAULT_TPM,
         iso,
     };
 

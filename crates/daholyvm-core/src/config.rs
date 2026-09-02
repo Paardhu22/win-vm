@@ -24,6 +24,10 @@ pub const DEFAULT_CPUS: u32 = 4;
 pub const DEFAULT_MEMORY_MIB: u64 = 4096;
 pub const DEFAULT_DISK_GIB: u64 = 64;
 
+/// Windows 11 setup checks for a TPM 2.0 and stops without one, so a VM has one
+/// unless the user says otherwise.
+pub const DEFAULT_TPM: bool = true;
+
 /// Longest name accepted, comfortably inside the 255 byte limit every Linux
 /// filesystem imposes on a single path component.
 pub const MAX_NAME_LEN: usize = 64;
@@ -110,6 +114,12 @@ pub struct VmConfig {
     pub memory_mib: u64,
     #[serde(default = "default_disk_gib")]
     pub disk_gib: u64,
+    /// Give the guest an emulated TPM 2.0.
+    ///
+    /// On by default because Windows 11 refuses to install without one, and a
+    /// guest that does not need it pays only a second process.
+    #[serde(default = "default_tpm")]
+    pub tpm: bool,
     /// Installation medium, attached as a CD-ROM for as long as it is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iso: Option<PathBuf>,
@@ -127,6 +137,10 @@ fn default_disk_gib() -> u64 {
     DEFAULT_DISK_GIB
 }
 
+fn default_tpm() -> bool {
+    DEFAULT_TPM
+}
+
 impl VmConfig {
     /// A new VM with default sizing.
     pub fn new(name: VmName) -> Self {
@@ -135,12 +149,18 @@ impl VmConfig {
             cpus: DEFAULT_CPUS,
             memory_mib: DEFAULT_MEMORY_MIB,
             disk_gib: DEFAULT_DISK_GIB,
+            tpm: DEFAULT_TPM,
             iso: None,
         }
     }
 
     pub fn with_iso(mut self, iso: Option<PathBuf>) -> Self {
         self.iso = iso;
+        self
+    }
+
+    pub fn with_tpm(mut self, tpm: bool) -> Self {
+        self.tpm = tpm;
         self
     }
 
@@ -264,6 +284,16 @@ mod tests {
         assert_eq!(config.memory_mib, DEFAULT_MEMORY_MIB);
         assert_eq!(config.disk_gib, DEFAULT_DISK_GIB);
         assert_eq!(config.iso, None);
+        assert!(config.tpm, "a VM gets a TPM unless it is turned off");
+    }
+
+    #[test]
+    fn a_tpm_can_be_turned_off_and_survives_a_round_trip() {
+        let config = VmConfig::new(name("win10")).with_tpm(false);
+        let text = config.to_toml().unwrap();
+        let loaded = VmConfig::from_toml(&text, "config.toml").unwrap();
+        assert!(!loaded.tpm);
+        assert_eq!(loaded, config);
     }
 
     #[test]

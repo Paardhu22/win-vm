@@ -39,6 +39,9 @@ pub fn build(config: &VmConfig, host: &HostReport, paths: &VmPaths) -> Result<Ve
 
     firmware_flash(&mut argv, firmware, paths);
     storage(&mut argv, config, paths);
+    if config.tpm {
+        tpm(&mut argv, paths);
+    }
     peripherals(&mut argv);
 
     Ok(argv.into_vec())
@@ -85,14 +88,14 @@ fn firmware_flash(argv: &mut Argv, firmware: &FirmwarePair, paths: &VmPaths) {
     }
     argv.flag_os(
         "-drive",
-        drive(
+        escaped(
             "if=pflash,format=raw,unit=0,readonly=on,file=",
             &firmware.code,
         ),
     );
     argv.flag_os(
         "-drive",
-        drive("if=pflash,format=raw,unit=1,file=", &paths.vars()),
+        escaped("if=pflash,format=raw,unit=1,file=", &paths.vars()),
     );
 }
 
@@ -107,7 +110,7 @@ fn storage(argv: &mut Argv, config: &VmConfig, paths: &VmPaths) {
 
     argv.flag_os(
         "-drive",
-        drive("id=hd,if=none,format=qcow2,file=", &paths.disk()),
+        escaped("id=hd,if=none,format=qcow2,file=", &paths.disk()),
     );
     argv.flag("-device", "ide-hd,drive=hd,bus=sata.0");
 
@@ -115,7 +118,7 @@ fn storage(argv: &mut Argv, config: &VmConfig, paths: &VmPaths) {
         Some(iso) => {
             argv.flag_os(
                 "-drive",
-                drive(
+                escaped(
                     "id=cd,if=none,format=raw,media=cdrom,readonly=on,file=",
                     iso,
                 ),
@@ -127,6 +130,21 @@ fn storage(argv: &mut Argv, config: &VmConfig, paths: &VmPaths) {
         }
         None => argv.flag("-boot", "order=c"),
     }
+}
+
+/// Connect the guest to the swtpm process started alongside it.
+///
+/// QEMU emulates no TPM of its own; `tpm-tis` is the interface the guest sees,
+/// `tpmdev emulator` is the backend, and the chardev is the socket the emulator
+/// is listening on. Windows 11 setup checks for this and stops without it.
+fn tpm(argv: &mut Argv, paths: &VmPaths) {
+    argv.flag_os(
+        "-chardev",
+        escaped("socket,id=chrtpm,path=", paths.tpm_socket()),
+    );
+    argv.flag("-tpmdev", "emulator,id=tpm0,chardev=chrtpm");
+    // tpm-tis is the interface Windows expects on a q35 machine.
+    argv.flag("-device", "tpm-tis,tpmdev=tpm0");
 }
 
 fn peripherals(argv: &mut Argv) {
@@ -143,12 +161,12 @@ fn peripherals(argv: &mut Argv) {
     argv.flag("-vga", "std");
 }
 
-/// Build a `-drive` value, escaping the path.
+/// Build a QEMU option-list value ending in a path, escaping the path.
 ///
 /// QEMU splits these values on commas, so a comma inside a path has to be
 /// doubled or the rest of the filename is read as further options. Paths are
 /// handled as bytes because a filename need not be UTF-8.
-fn drive(options: &str, path: &Path) -> OsString {
+fn escaped(options: &str, path: &Path) -> OsString {
     let mut bytes = Vec::from(options.as_bytes());
     for &byte in path.as_os_str().as_bytes() {
         if byte == b',' {
@@ -383,6 +401,31 @@ mod tests {
             .chunks(2)
             .all(|pair| pair[0].starts_with('-') && !pair[1].starts_with('-')));
         assert!(argv.iter().any(|a| a.contains("/iso/a b;c.iso")));
+    }
+
+    #[test]
+    fn a_tpm_is_wired_to_the_swtpm_socket_by_default() {
+        let argv = build_ok(&config(None), &ready_host());
+        assert_eq!(
+            value_of(&argv, "-chardev").as_deref(),
+            Some("socket,id=chrtpm,path=/data/daholyvm/vms/win11/tpm/swtpm.sock")
+        );
+        assert_eq!(
+            value_of(&argv, "-tpmdev").as_deref(),
+            Some("emulator,id=tpm0,chardev=chrtpm")
+        );
+        assert!(values_of(&argv, "-device")
+            .iter()
+            .any(|d| d == "tpm-tis,tpmdev=tpm0"));
+    }
+
+    #[test]
+    fn turning_the_tpm_off_removes_every_trace_of_it() {
+        let argv = build_ok(&config(None).with_tpm(false), &ready_host());
+        assert!(
+            !argv.iter().any(|a| a.contains("tpm")),
+            "no TPM flags may survive: {argv:?}"
+        );
     }
 
     #[test]
