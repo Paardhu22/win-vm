@@ -10,9 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use daholyvm_core::config::{
-    VmConfig, VmName, DEFAULT_CPUS, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB, DEFAULT_TPM,
-};
+use daholyvm_core::config::{VmConfig, VmName, DEFAULT_CPUS, DEFAULT_DISK_GIB, DEFAULT_MEMORY_MIB};
 use daholyvm_core::paths::Paths;
 use daholyvm_core::preflight::HostReport;
 use daholyvm_core::{Result, Vm};
@@ -57,6 +55,10 @@ enum Command {
         /// Disk size in GiB.
         #[arg(long, value_name = "GIB", default_value_t = DEFAULT_DISK_GIB)]
         disk: u64,
+
+        /// Do not give the guest a TPM. Windows 11 will refuse to install.
+        #[arg(long)]
+        no_tpm: bool,
     },
 
     /// Boot a virtual machine and wait for it to shut down.
@@ -80,7 +82,8 @@ fn main() -> ExitCode {
             cpus,
             memory,
             disk,
-        } => report(create(name, iso, cpus, memory, disk)),
+            no_tpm,
+        } => report(create(name, iso, cpus, memory, disk, !no_tpm)),
         Command::Run { name } => run(&name),
         Command::List => report(list()),
     }
@@ -125,13 +128,14 @@ fn create(
     cpus: u32,
     memory_mib: u64,
     disk_gib: u64,
+    tpm: bool,
 ) -> Result<()> {
     let config = VmConfig {
         name: VmName::new(name)?,
         cpus,
         memory_mib,
         disk_gib,
-        tpm: DEFAULT_TPM,
+        tpm,
         iso,
     };
 

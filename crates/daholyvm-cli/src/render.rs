@@ -105,8 +105,11 @@ pub fn print_created(vm: &Vm) {
     println!();
     println!("Created `{}`", config.name);
     println!(
-        "  {} vCPU, {} MiB RAM, {} GiB disk",
-        config.cpus, config.memory_mib, config.disk_gib
+        "  {} vCPU, {} MiB RAM, {} GiB disk, {}",
+        config.cpus,
+        config.memory_mib,
+        config.disk_gib,
+        tpm_summary(config.tpm)
     );
     println!("  {}", vm.paths().dir().display());
     println!();
@@ -125,6 +128,16 @@ pub fn print_created(vm: &Vm) {
         }
     }
     println!();
+}
+
+/// Spell out the consequence rather than the setting: "no TPM" means nothing
+/// to someone who has not yet hit the Windows 11 requirements check.
+fn tpm_summary(tpm: bool) -> &'static str {
+    if tpm {
+        "TPM 2.0"
+    } else {
+        "no TPM (Windows 11 will refuse to install)"
+    }
 }
 
 pub fn print_running(vm: &Vm, pid: u32) {
@@ -154,11 +167,12 @@ pub fn print_list(vms: &[Vm], paths: &Paths) {
     for vm in vms {
         let config = vm.config();
         println!(
-            "  {:<name_width$}  {} vCPU, {} MiB RAM, {} GiB disk",
+            "  {:<name_width$}  {} vCPU, {} MiB RAM, {} GiB disk, {}",
             config.name.as_str(),
             config.cpus,
             config.memory_mib,
             config.disk_gib,
+            tpm_summary(config.tpm),
             name_width = name_width,
         );
     }
@@ -208,5 +222,12 @@ mod tests {
     #[test]
     fn empty_text_wraps_to_no_lines() {
         assert!(wrap("   ", 10).is_empty());
+    }
+
+    #[test]
+    fn the_absence_of_a_tpm_is_described_by_its_consequence() {
+        // "no TPM" means nothing until you have met the Windows 11 check.
+        assert!(tpm_summary(false).contains("Windows 11"));
+        assert_eq!(tpm_summary(true), "TPM 2.0");
     }
 }
